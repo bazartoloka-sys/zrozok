@@ -2,5 +2,6 @@
 .gitignore
 .assetsignore
 wrangler.jsonc
+worker.js
 README.md
 node_modules

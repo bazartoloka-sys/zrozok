@@ -1,8 +1,13 @@
 {
   "name": "zrozok",
   "compatibility_date": "2026-11-07",
+  "main": "worker.js",
   "assets": {
     "directory": "./",
+    "binding": "ASSETS",
     "not_found_handling": "404-page"
-  }
+  },
+  "kv_namespaces": [
+    { "binding": "ZROZOK_STORE", "id": "3b71c0eb22a444dd8ca0b7e235363f09" }
+  ]
 }
