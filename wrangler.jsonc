@@ -12,8 +12,7 @@
     { "binding": "ZROZOK_STORE", "id": "3b71c0eb22a444dd8ca0b7e235363f09" }
   ],
   "secrets_store_secrets": [
-    { "binding": "ADMIN_HOLOSNYK_ID", "store_id": "9cee3832b5c041368cac26bc6f7a64ee", "secret_name": "ADMIN_HOLOSNYK_ID" },
-    { "binding": "ADMIN_PASSWORD_HASH", "store_id": "9cee3832b5c041368cac26bc6f7a64ee", "secret_name": "ADMIN_PASSWORD_HASH" },
-    { "binding": "SESSION_SECRET", "store_id": "9cee3832b5c041368cac26bc6f7a64ee", "secret_name": "SESSION_SECRET" }
+    { "binding": "SESSION_SECRET", "store_id": "9cee3832b5c041368cac26bc6f7a64ee", "secret_name": "SESSION_SECRET" },
+    { "binding": "OWNER_TOKEN", "store_id": "9cee3832b5c041368cac26bc6f7a64ee", "secret_name": "OWNER_TOKEN" }
   ]
 }

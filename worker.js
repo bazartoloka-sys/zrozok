@@ -13,11 +13,27 @@ const DEFAULT_DATA = {
 
 const LOGIN_LIMIT = 5;
 const LOGIN_WINDOW = 900;
+const SESSION_TTL = 2 * 3600;
+const CODE_TTL = 86400;
+const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const MIN_PASSWORD = 8;
+
+const HOMOGLYPHS = {
+  A: "А", B: "В", C: "С", E: "Е", H: "Н", I: "І", K: "К",
+  M: "М", O: "О", P: "Р", T: "Т", X: "Х", Y: "У"
+};
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   }[c]));
+}
+
+function normalizeId(raw) {
+  const up = String(raw || "").trim().toUpperCase().replace(/\s+/g, "");
+  let out = "";
+  for (const ch of up) out += HOMOGLYPHS[ch] || ch;
+  return out;
 }
 
 function hexToBytes(hex) {
@@ -39,22 +55,58 @@ function timingSafeEqual(a, b) {
   return diff === 0;
 }
 
-async function verifyPassword(password, stored) {
-  const parts = (stored || "").split("$");
-  if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
-  const iterations = parseInt(parts[1], 10);
-  const salt = hexToBytes(parts[2]);
-  const expectedHex = parts[3];
-  const enc = new TextEncoder();
+function b64urlEncode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function b64urlDecode(s) {
+  const bin = atob(String(s).replace(/-/g, "+").replace(/_/g, "/"));
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+async function sha256hex(text) {
+  const bits = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return bytesToHex(new Uint8Array(bits));
+}
+
+async function derive(password, salt, iterations) {
   const keyMaterial = await crypto.subtle.importKey(
-    "raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]
+    "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]
   );
   const bits = await crypto.subtle.deriveBits(
     { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
     keyMaterial, 256
   );
-  const gotHex = bytesToHex(new Uint8Array(bits));
-  return timingSafeEqual(gotHex, expectedHex);
+  return bytesToHex(new Uint8Array(bits));
+}
+
+async function hashPassword(password) {
+  const iterations = 100000;
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hashHex = await derive(password, salt, iterations);
+  return `pbkdf2$${iterations}$${bytesToHex(salt)}$${hashHex}`;
+}
+
+async function verifyPassword(password, stored) {
+  const parts = (stored || "").split("$");
+  if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
+  const iterations = parseInt(parts[1], 10);
+  const gotHex = await derive(password, hexToBytes(parts[2]), iterations);
+  return timingSafeEqual(gotHex, parts[3]);
+}
+
+function makeCode() {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  let out = "";
+  for (let i = 0; i < 8; i++) {
+    out += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
+    if (i === 3) out += "-";
+  }
+  return out;
 }
 
 function getClientIp(request) {
@@ -77,19 +129,18 @@ async function clearFailCount(env, key) {
 }
 
 async function hmac(secret, message) {
-  const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
-    "raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+    "raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
   );
-  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(message));
-  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return bytesToHex(new Uint8Array(sig));
 }
 
-async function makeSession(env) {
-  const exp = Math.floor(Date.now() / 1000) + 2 * 3600;
-  const secret = await env.SESSION_SECRET.get();
-  const sig = await hmac(secret, String(exp));
-  return `${exp}.${sig}`;
+async function makeSession(env, payload) {
+  const body = { ...payload, exp: Math.floor(Date.now() / 1000) + SESSION_TTL };
+  const encoded = b64urlEncode(JSON.stringify(body));
+  const sig = await hmac(await env.SESSION_SECRET.get(), encoded);
+  return `${encoded}.${sig}`;
 }
 
 function getCookie(request, name) {
@@ -98,24 +149,33 @@ function getCookie(request, name) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-async function isAuthed(request, env) {
-  const raw = getCookie(request, "zr_adm");
-  if (!raw) return false;
-  const [expStr, sig] = raw.split(".");
-  if (!expStr || !sig) return false;
-  const exp = parseInt(expStr, 10);
-  if (!exp || Date.now() / 1000 > exp) return false;
-  const secret = await env.SESSION_SECRET.get();
-  const expected = await hmac(secret, expStr);
-  return expected === sig;
+async function readSession(request, env) {
+  const raw = getCookie(request, "zr_s");
+  if (!raw) return null;
+  const [encoded, sig] = raw.split(".");
+  if (!encoded || !sig) return null;
+  const expected = await hmac(await env.SESSION_SECRET.get(), encoded);
+  if (!timingSafeEqual(expected, sig)) return null;
+  try {
+    const body = JSON.parse(b64urlDecode(encoded));
+    if (!body.exp || Date.now() / 1000 > body.exp) return null;
+    return body;
+  } catch {
+    return null;
+  }
 }
+
+function sessionCookie(token) {
+  return `zr_s=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL}`;
+}
+
+const CLEAR_COOKIE = "zr_s=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0";
 
 async function loadData(env) {
   const raw = await env.ZROZOK_STORE.get("store:main");
   if (!raw) return DEFAULT_DATA;
   try {
-    const parsed = JSON.parse(raw);
-    return { ...DEFAULT_DATA, ...parsed };
+    return { ...DEFAULT_DATA, ...JSON.parse(raw) };
   } catch {
     return DEFAULT_DATA;
   }
@@ -124,6 +184,39 @@ async function loadData(env) {
 async function saveData(env, data) {
   await env.ZROZOK_STORE.put("store:main", JSON.stringify(data));
 }
+
+async function getSeller(env, id) {
+  const raw = await env.ZROZOK_STORE.get(`seller:${id}`);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function html(body, status) {
+  return new Response(body, {
+    status: status || 200,
+    headers: { "Content-Type": "text/html; charset=utf-8" }
+  });
+}
+
+function redirect(location, cookie) {
+  const headers = { "Location": location };
+  if (cookie) headers["Set-Cookie"] = cookie;
+  return new Response(null, { status: 303, headers });
+}
+
+const HEAD = `<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Neucha&family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/style.css">`;
+
+const FIELD = "width:100%;margin-top:4px;padding:10px 12px;border:2px solid var(--ink);border-radius:12px;font-size:14px;box-sizing:border-box;";
+const LABEL = "font-size:13px;color:var(--graphite);";
 
 function renderStorefront(data, authed) {
   const limit = data.tier === "Pro" ? 10 : 4;
@@ -145,13 +238,8 @@ function renderStorefront(data, authed) {
   return `<!doctype html>
 <html lang="uk">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+${HEAD}
 <title>${esc(data.storeName)} — вітрина</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Neucha&family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/style.css">
 <style>:root{--accent:${esc(data.accent)};}</style>
 </head>
 <body>
@@ -218,160 +306,307 @@ function renderStorefront(data, authed) {
 </html>`;
 }
 
-function renderLoginPage(error) {
+function page(title, inner, maxWidth) {
   return `<!doctype html>
 <html lang="uk">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Вхід — zrozok</title>
+${HEAD}
+<title>${esc(title)}</title>
 <meta name="robots" content="noindex">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Neucha&family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
-<div class="page" style="display:flex;align-items:center;justify-content:center;">
-  <div class="vitryna" style="padding:32px 24px;">
-    <div class="shop-name" style="font-size:26px;text-align:center;margin-bottom:18px;">Вхід у вітрину</div>
-    ${error ? `<p style="color:#b4432f;font-size:13px;text-align:center;margin:0 0 14px;">${esc(error)}</p>` : ""}
-    <form method="POST" action="/admin/login" style="display:flex;flex-direction:column;gap:12px;">
-      <label style="font-size:13px;color:var(--graphite);">
-        ID Голосника
-        <input type="text" name="holosnyk_id" placeholder="ГЛС-0000-XXX" required style="width:100%;margin-top:4px;padding:10px 12px;border:2px solid var(--ink);border-radius:12px;font-size:14px;box-sizing:border-box;">
-      </label>
-      <label style="font-size:13px;color:var(--graphite);">
-        Пароль
-        <input type="password" name="password" required style="width:100%;margin-top:4px;padding:10px 12px;border:2px solid var(--ink);border-radius:12px;font-size:14px;box-sizing:border-box;">
-      </label>
-      <button type="submit" class="btn-pay">Увійти</button>
-    </form>
-    <p style="font-size:11px;color:var(--muted);text-align:center;margin-top:16px;">Тимчасовий вхід. Пізніше — через Голосник.</p>
+<div class="page">
+  <div class="vitryna" style="max-width:${maxWidth || 420}px;padding:30px 24px;margin:0 auto;">
+${inner}
   </div>
 </div>
 </body>
 </html>`;
 }
 
-function renderAdminForm(data, saved) {
+function renderLoginPage(error) {
+  return page("Вхід — вітрина", `
+    <div class="shop-name" style="font-size:26px;text-align:center;margin-bottom:18px;">Вхід у вітрину</div>
+    ${error ? `<p style="color:#b4432f;font-size:13px;text-align:center;margin:0 0 14px;">${esc(error)}</p>` : ""}
+    <form method="POST" action="/admin/login" style="display:flex;flex-direction:column;gap:12px;">
+      <label style="${LABEL}">
+        ID Голосника
+        <input type="text" name="holosnyk_id" placeholder="ГЛС-0000-ХХХ" required style="${FIELD}">
+      </label>
+      <label style="${LABEL}">
+        Пароль
+        <input type="password" name="password" required style="${FIELD}">
+      </label>
+      <button type="submit" class="btn-pay">Увійти</button>
+    </form>
+    <p style="font-size:12px;text-align:center;margin-top:16px;">
+      <a href="/activate" style="color:var(--graphite);">Перший вхід або забули пароль?</a>
+    </p>`);
+}
+
+function renderActivatePage(message, error, prefillId) {
+  return page("Активація — вітрина", `
+    <div class="shop-name" style="font-size:24px;text-align:center;margin-bottom:8px;">Активація вітрини</div>
+    <p style="font-size:12px;color:var(--graphite);text-align:center;margin:0 0 16px;">Введіть свій ID Голосника, код активації та придумайте пароль.</p>
+    ${error ? `<p style="color:#b4432f;font-size:13px;text-align:center;margin:0 0 14px;">${esc(error)}</p>` : ""}
+    ${message ? `<p style="color:#2f7a4d;font-size:13px;text-align:center;margin:0 0 14px;">${esc(message)}</p>` : ""}
+    <form method="POST" action="/activate" style="display:flex;flex-direction:column;gap:12px;">
+      <label style="${LABEL}">
+        ID Голосника
+        <input type="text" name="holosnyk_id" value="${esc(prefillId || "")}" placeholder="ГЛС-0000-ХХХ" required style="${FIELD}">
+      </label>
+      <label style="${LABEL}">
+        Код активації
+        <input type="text" name="code" placeholder="XXXX-XXXX" required style="${FIELD}">
+      </label>
+      <label style="${LABEL}">
+        Новий пароль (від ${MIN_PASSWORD} символів)
+        <input type="password" name="password" required style="${FIELD}">
+      </label>
+      <label style="${LABEL}">
+        Повторіть пароль
+        <input type="password" name="password2" required style="${FIELD}">
+      </label>
+      <button type="submit" class="btn-pay">Активувати</button>
+    </form>
+    <p style="font-size:12px;text-align:center;margin-top:16px;">
+      <a href="/admin" style="color:var(--graphite);">← До входу</a>
+    </p>`);
+}
+
+function renderAdminForm(data, sellerId, saved) {
   const productsText = (data.products || []).map((p) => `${p.name}; ${p.price}`).join("\n");
-  return `<!doctype html>
-<html lang="uk">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Адмінка — zrozok</title>
-<meta name="robots" content="noindex">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Neucha&family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/style.css">
-</head>
-<body>
-<div class="page">
-  <div class="vitryna" style="max-width:480px;padding:28px 22px;">
+  return page("Адмінка — вітрина", `
     <div class="shop-name" style="font-size:24px;">Редагування вітрини</div>
+    <p style="font-size:11px;color:var(--graphite);margin:4px 0 0;">${esc(sellerId)}</p>
     ${saved ? `<p style="color:#2f7a4d;font-size:13px;margin:10px 0 0;">Збережено.</p>` : ""}
     <form method="POST" action="/admin/save" style="display:flex;flex-direction:column;gap:14px;margin-top:16px;">
-      <label style="font-size:13px;color:var(--graphite);">
+      <label style="${LABEL}">
         Назва магазину
-        <input type="text" name="store_name" value="${esc(data.storeName)}" required style="width:100%;margin-top:4px;padding:10px 12px;border:2px solid var(--ink);border-radius:12px;font-size:14px;box-sizing:border-box;">
+        <input type="text" name="store_name" value="${esc(data.storeName)}" required style="${FIELD}">
       </label>
-      <label style="font-size:13px;color:var(--graphite);">
+      <label style="${LABEL}">
         Категорія
-        <input type="text" name="category" value="${esc(data.category)}" required style="width:100%;margin-top:4px;padding:10px 12px;border:2px solid var(--ink);border-radius:12px;font-size:14px;box-sizing:border-box;">
+        <input type="text" name="category" value="${esc(data.category)}" required style="${FIELD}">
       </label>
-      <label style="font-size:13px;color:var(--graphite);">
+      <label style="${LABEL}">
         Тариф
-        <select name="tier" style="width:100%;margin-top:4px;padding:10px 12px;border:2px solid var(--ink);border-radius:12px;font-size:14px;box-sizing:border-box;">
+        <select name="tier" style="${FIELD}">
           <option value="Free" ${data.tier === "Free" ? "selected" : ""}>Free (4 товари)</option>
           <option value="Pro" ${data.tier === "Pro" ? "selected" : ""}>Pro (до 10 товарів)</option>
         </select>
       </label>
-      <label style="font-size:13px;color:var(--graphite);">
+      <label style="${LABEL}">
         Акцентний колір
         <input type="color" name="accent" value="${esc(data.accent)}" style="display:block;margin-top:4px;width:60px;height:36px;border:2px solid var(--ink);border-radius:8px;padding:2px;">
       </label>
-      <label style="font-size:13px;color:var(--graphite);">
+      <label style="${LABEL}">
         Товари — по одному в рядку, формат «Назва; Ціна»
-        <textarea name="products_text" rows="6" style="width:100%;margin-top:4px;padding:10px 12px;border:2px solid var(--ink);border-radius:12px;font-size:13px;box-sizing:border-box;font-family:inherit;">${esc(productsText)}</textarea>
+        <textarea name="products_text" rows="6" style="${FIELD}font-family:inherit;">${esc(productsText)}</textarea>
       </label>
       <button type="submit" class="btn-pay">Зберегти</button>
     </form>
-    <div style="display:flex;justify-content:space-between;margin-top:18px;">
-      <a href="/" style="font-size:12px;color:var(--muted);">← На вітрину</a>
-      <a href="/admin/logout" style="font-size:12px;color:var(--muted);">Вийти</a>
-    </div>
-  </div>
-</div>
-</body>
-</html>`;
+    <div style="display:flex;justify-content:space-between;margin-top:18px;font-size:12px;">
+      <a href="/" style="color:var(--graphite);">← На вітрину</a>
+      <a href="/admin/logout" style="color:var(--graphite);">Вийти</a>
+    </div>`);
+}
+
+function renderOwnerLogin(error) {
+  return page("Панель власника", `
+    <div class="shop-name" style="font-size:24px;text-align:center;margin-bottom:18px;">Панель власника</div>
+    ${error ? `<p style="color:#b4432f;font-size:13px;text-align:center;margin:0 0 14px;">${esc(error)}</p>` : ""}
+    <form method="POST" action="/owner/login" style="display:flex;flex-direction:column;gap:12px;">
+      <label style="${LABEL}">
+        Токен власника
+        <input type="password" name="token" required style="${FIELD}">
+      </label>
+      <button type="submit" class="btn-pay">Увійти</button>
+    </form>`);
+}
+
+function renderOwnerPanel(sellers, issued, error) {
+  const rows = sellers.length
+    ? sellers.map((s) => `
+      <tr>
+        <td style="padding:6px 8px;border-bottom:1px solid #E0E3E7;font-size:13px;">${esc(s.id)}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #E0E3E7;font-size:12px;color:var(--graphite);">${s.active ? "активний" : "очікує активації"}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="2" style="padding:8px;font-size:12px;color:var(--graphite);">Поки нікого немає.</td></tr>`;
+
+  const issuedBlock = issued ? `
+    <div style="margin:16px 0;padding:14px;border:2px dashed var(--ink);border-radius:14px;text-align:center;">
+      <p style="font-size:12px;color:var(--graphite);margin:0 0 6px;">Код для ${esc(issued.id)} — діє 24 години:</p>
+      <p style="font-family:'IBM Plex Mono',monospace;font-size:24px;letter-spacing:2px;margin:0;">${esc(issued.code)}</p>
+      <p style="font-size:11px;color:var(--graphite);margin:8px 0 0;">Передайте продавцю разом із посиланням на /activate. Більше він не показується.</p>
+    </div>` : "";
+
+  return page("Панель власника", `
+    <div class="shop-name" style="font-size:24px;">Панель власника</div>
+    ${error ? `<p style="color:#b4432f;font-size:13px;margin:10px 0 0;">${esc(error)}</p>` : ""}
+    ${issuedBlock}
+    <form method="POST" action="/owner/issue" style="display:flex;flex-direction:column;gap:12px;margin-top:16px;">
+      <label style="${LABEL}">
+        ID Голосника продавця
+        <input type="text" name="holosnyk_id" placeholder="ГЛС-0000-ХХХ" required style="${FIELD}">
+      </label>
+      <button type="submit" class="btn-pay">Видати код активації</button>
+    </form>
+    <p style="font-size:11px;color:var(--graphite);margin-top:10px;">Для нового продавця — заводить акаунт. Для наявного — скидає пароль.</p>
+    <table style="width:100%;border-collapse:collapse;margin-top:20px;">
+      <thead><tr>
+        <th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--graphite);border-bottom:2px solid var(--ink);">Продавець</th>
+        <th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--graphite);border-bottom:2px solid var(--ink);">Статус</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="display:flex;justify-content:space-between;margin-top:18px;font-size:12px;">
+      <a href="/" style="color:var(--graphite);">← На вітрину</a>
+      <a href="/owner/logout" style="color:var(--graphite);">Вийти</a>
+    </div>`, 520);
+}
+
+async function listSellers(env) {
+  const map = new Map();
+  const sellers = await env.ZROZOK_STORE.list({ prefix: "seller:" });
+  for (const k of sellers.keys) map.set(k.name.slice(7), { id: k.name.slice(7), active: true });
+  const pending = await env.ZROZOK_STORE.list({ prefix: "activation:" });
+  for (const k of pending.keys) {
+    const id = k.name.slice(11);
+    if (!map.has(id)) map.set(id, { id, active: false });
+  }
+  return [...map.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
+    const method = request.method;
+    const ip = getClientIp(request);
 
-    if (path === "/admin/login" && request.method === "POST") {
+    if (path === "/admin/login" && method === "POST") {
       const form = await request.formData();
-      const id = (form.get("holosnyk_id") || "").toString().trim();
+      const id = normalizeId(form.get("holosnyk_id"));
       const pass = (form.get("password") || "").toString();
-      const ip = getClientIp(request);
       const idKey = `login_fail:id:${id || "empty"}`;
       const ipKey = `login_fail:ip:${ip}`;
 
       const [idFails, ipFails] = await Promise.all([
-        getFailCount(env, idKey),
-        getFailCount(env, ipKey)
+        getFailCount(env, idKey), getFailCount(env, ipKey)
       ]);
       if (idFails >= LOGIN_LIMIT || ipFails >= LOGIN_LIMIT) {
-        return new Response(renderLoginPage("Забагато спроб. Спробуйте через 15 хвилин."), {
-          status: 429,
-          headers: { "Content-Type": "text/html; charset=utf-8" }
-        });
+        return html(renderLoginPage("Забагато спроб. Спробуйте через 15 хвилин."), 429);
       }
 
-      const storedId = await env.ADMIN_HOLOSNYK_ID.get();
-      const storedHash = await env.ADMIN_PASSWORD_HASH.get();
-      const idOk = Boolean(id) && id === storedId;
-      const passOk = Boolean(pass) && (await verifyPassword(pass, storedHash));
+      const seller = id ? await getSeller(env, id) : null;
+      const ok = seller && pass && (await verifyPassword(pass, seller.hash));
 
-      if (idOk && passOk) {
+      if (ok) {
         await Promise.all([clearFailCount(env, idKey), clearFailCount(env, ipKey)]);
-        const token = await makeSession(env);
-        return new Response(null, {
-          status: 303,
-          headers: {
-            "Location": "/admin",
-            "Set-Cookie": `zr_adm=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=7200`
-          }
-        });
+        const token = await makeSession(env, { r: "seller", id });
+        return redirect("/admin", sessionCookie(token));
       }
 
       await Promise.all([bumpFailCount(env, idKey), bumpFailCount(env, ipKey)]);
-      return new Response(renderLoginPage("Невірний ID або пароль."), {
-        status: 401,
-        headers: { "Content-Type": "text/html; charset=utf-8" }
-      });
+      return html(renderLoginPage("Невірний ID або пароль."), 401);
     }
 
     if (path === "/admin/logout") {
-      return new Response(null, {
-        status: 303,
-        headers: {
-          "Location": "/admin",
-          "Set-Cookie": "zr_adm=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
-        }
-      });
+      return redirect("/admin", CLEAR_COOKIE);
     }
 
-    if (path === "/admin/save" && request.method === "POST") {
-      const authed = await isAuthed(request, env);
-      if (!authed) {
-        return new Response(null, { status: 303, headers: { "Location": "/admin" } });
+    if (path === "/activate" && method === "GET") {
+      return html(renderActivatePage(null, null, url.searchParams.get("id")));
+    }
+
+    if (path === "/activate" && method === "POST") {
+      const form = await request.formData();
+      const id = normalizeId(form.get("holosnyk_id"));
+      const code = String(form.get("code") || "").trim().toUpperCase();
+      const pass = (form.get("password") || "").toString();
+      const pass2 = (form.get("password2") || "").toString();
+      const failKey = `act_fail:ip:${ip}`;
+
+      if ((await getFailCount(env, failKey)) >= LOGIN_LIMIT) {
+        return html(renderActivatePage(null, "Забагато спроб. Спробуйте через 15 хвилин.", id), 429);
       }
+      if (pass.length < MIN_PASSWORD) {
+        return html(renderActivatePage(null, `Пароль має бути від ${MIN_PASSWORD} символів.`, id), 400);
+      }
+      if (pass !== pass2) {
+        return html(renderActivatePage(null, "Паролі не збігаються.", id), 400);
+      }
+
+      const storedCodeHash = id ? await env.ZROZOK_STORE.get(`activation:${id}`) : null;
+      const codeOk = storedCodeHash && timingSafeEqual(await sha256hex(code), storedCodeHash);
+
+      if (!codeOk) {
+        await bumpFailCount(env, failKey);
+        return html(renderActivatePage(null, "Невірний ID або код активації.", id), 401);
+      }
+
+      const existing = await getSeller(env, id);
+      await env.ZROZOK_STORE.put(`seller:${id}`, JSON.stringify({
+        hash: await hashPassword(pass),
+        created: existing?.created || new Date().toISOString(),
+        updated: new Date().toISOString()
+      }));
+      await env.ZROZOK_STORE.delete(`activation:${id}`);
+      await clearFailCount(env, failKey);
+      await clearFailCount(env, `login_fail:id:${id}`);
+
+      const token = await makeSession(env, { r: "seller", id });
+      return redirect("/admin", sessionCookie(token));
+    }
+
+    if (path === "/owner/login" && method === "POST") {
+      const form = await request.formData();
+      const token = (form.get("token") || "").toString();
+      const failKey = `owner_fail:ip:${ip}`;
+
+      if ((await getFailCount(env, failKey)) >= LOGIN_LIMIT) {
+        return html(renderOwnerLogin("Забагато спроб. Спробуйте через 15 хвилин."), 429);
+      }
+
+      const expected = await env.OWNER_TOKEN.get();
+      if (token && timingSafeEqual(token, expected)) {
+        await clearFailCount(env, failKey);
+        return redirect("/owner", sessionCookie(await makeSession(env, { r: "owner" })));
+      }
+
+      await bumpFailCount(env, failKey);
+      return html(renderOwnerLogin("Невірний токен."), 401);
+    }
+
+    if (path === "/owner/logout") {
+      return redirect("/owner", CLEAR_COOKIE);
+    }
+
+    if (path === "/owner/issue" && method === "POST") {
+      const session = await readSession(request, env);
+      if (!session || session.r !== "owner") return redirect("/owner");
+
+      const form = await request.formData();
+      const id = normalizeId(form.get("holosnyk_id"));
+      if (!id) {
+        return html(renderOwnerPanel(await listSellers(env), null, "Вкажіть ID Голосника."), 400);
+      }
+      const code = makeCode();
+      await env.ZROZOK_STORE.put(`activation:${id}`, await sha256hex(code), { expirationTtl: CODE_TTL });
+      return html(renderOwnerPanel(await listSellers(env), { id, code }, null));
+    }
+
+    if (path === "/owner") {
+      const session = await readSession(request, env);
+      if (!session || session.r !== "owner") return html(renderOwnerLogin(null));
+      return html(renderOwnerPanel(await listSellers(env), null, null));
+    }
+
+    if (path === "/admin/save" && method === "POST") {
+      const session = await readSession(request, env);
+      if (!session || session.r !== "seller") return redirect("/admin");
+
       const form = await request.formData();
       const productsText = (form.get("products_text") || "").toString();
       const products = productsText.split("\n").map((l) => l.trim()).filter(Boolean).map((line) => {
@@ -379,36 +614,27 @@ export default {
         if (idx === -1) return { name: line.trim(), price: "" };
         return { name: line.slice(0, idx).trim(), price: line.slice(idx + 1).trim() };
       });
-      const data = {
+      await saveData(env, {
         storeName: (form.get("store_name") || "").toString().trim() || DEFAULT_DATA.storeName,
         category: (form.get("category") || "").toString().trim() || DEFAULT_DATA.category,
         tier: form.get("tier") === "Pro" ? "Pro" : "Free",
         accent: (form.get("accent") || "").toString().trim() || DEFAULT_DATA.accent,
         products
-      };
-      await saveData(env, data);
-      return new Response(null, { status: 303, headers: { "Location": "/admin?saved=1" } });
+      });
+      return redirect("/admin?saved=1");
     }
 
-    if (path === "/admin" && (request.method === "GET" || request.method === "POST")) {
-      const authed = await isAuthed(request, env);
-      if (!authed) {
-        return new Response(renderLoginPage(null), {
-          headers: { "Content-Type": "text/html; charset=utf-8" }
-        });
-      }
+    if (path === "/admin") {
+      const session = await readSession(request, env);
+      if (!session || session.r !== "seller") return html(renderLoginPage(null));
       const data = await loadData(env);
-      return new Response(renderAdminForm(data, url.searchParams.get("saved") === "1"), {
-        headers: { "Content-Type": "text/html; charset=utf-8" }
-      });
+      return html(renderAdminForm(data, session.id, url.searchParams.get("saved") === "1"));
     }
 
     if (path === "/") {
-      const authed = await isAuthed(request, env);
+      const session = await readSession(request, env);
       const data = await loadData(env);
-      return new Response(renderStorefront(data, authed), {
-        headers: { "Content-Type": "text/html; charset=utf-8" }
-      });
+      return html(renderStorefront(data, Boolean(session && session.r === "seller")));
     }
 
     return env.ASSETS.fetch(request);
