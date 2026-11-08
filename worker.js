@@ -223,7 +223,7 @@ function renderStorefront(data, authed) {
   const limit = data.tier === "Pro" ? 10 : 4;
   const products = (data.products || []).slice(0, limit);
   const cardsHtml = products.map((p) => `
-        <li class="card"><div class="card-photo">${p.photo ? `<img src="/photos/${esc(p.photo)}" alt="${esc(p.name)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">` : `<span>фото товару</span>`}</div><div class="card-body"><div class="card-name">${esc(p.name)}</div><div class="card-price">${esc(p.price)}</div></div></li>`).join("");
+        <li class="card"><div class="card-photo">${p.photo ? `<img src="/${esc(p.photo)}" alt="${esc(p.name)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">` : `<span>фото товару</span>`}</div><div class="card-body"><div class="card-name">${esc(p.name)}</div><div class="card-price">${esc(p.price)}</div></div></li>`).join("");
   const tierNote = data.tier === "Pro"
     ? "Показано до 10 товарів. Великий каталог (до 1000) — через Базар Толока."
     : `Показано ${products.length} товари. Більше — на тарифі Pro.`;
@@ -378,7 +378,7 @@ function renderActivatePage(message, error, prefillId) {
 function productRow(i, product) {
   const p = product || { name: "", price: "", photo: "" };
   const preview = p.photo
-    ? `<img src="/photos/${esc(p.photo)}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:2px solid var(--ink);flex:none;">`
+    ? `<img src="/${esc(p.photo)}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:2px solid var(--ink);flex:none;">`
     : `<div style="width:48px;height:48px;border-radius:8px;border:2px dashed var(--ink);flex:none;"></div>`;
   const removeOption = p.photo
     ? `<label style="font-size:11px;color:var(--graphite);display:flex;align-items:center;gap:4px;margin-top:2px;">
