@@ -3,6 +3,12 @@ const DEFAULT_DATA = {
   category: "В'язання і хендмейд",
   tier: "Free",
   accent: "#D9643F",
+  avatar: "",
+  slug: "",
+  legal: {
+    fullName: "", regNumber: "", legalAddress: "", returnAddress: "",
+    email: "", phone: "", licenseInfo: ""
+  },
   products: [
     { name: "Шапка", price: "320 ₴", photo: "" },
     { name: "Шарф", price: "280 ₴", photo: "" },
@@ -19,9 +25,26 @@ const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MIN_PASSWORD = 8;
 const MAX_PHOTO_BYTES = 4 * 1024 * 1024;
 
+const PUBLIC_HOST_SUFFIXES = [".tiktok.bazar.in.ua", ".insta.bazar.in.ua"];
+
+const RESERVED_SLUGS = new Set([
+  "www", "api", "admin", "owner", "mail", "ftp", "ns1", "ns2", "app",
+  "static", "assets", "test", "null", "undefined", "photos", "activate",
+  "cabinet", "support", "help", "zrozok", "torg", "bazar", "magistral"
+]);
+
 const HOMOGLYPHS = {
   A: "А", B: "В", C: "С", E: "Е", H: "Н", I: "І", K: "К",
   M: "М", O: "О", P: "Р", T: "Т", X: "Х", Y: "У"
+};
+
+const TRANSLIT = {
+  "а": "a", "б": "b", "в": "v", "г": "h", "ґ": "g", "д": "d", "е": "e",
+  "є": "ye", "ж": "zh", "з": "z", "и": "y", "і": "i", "ї": "yi", "й": "y",
+  "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
+  "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts", "ч": "ch",
+  "ш": "sh", "щ": "shch", "ю": "yu", "я": "ya", "ь": "", "ъ": "",
+  "ы": "y", "э": "e"
 };
 
 function esc(s) {
@@ -35,6 +58,22 @@ function normalizeId(raw) {
   let out = "";
   for (const ch of up) out += HOMOGLYPHS[ch] || ch;
   return out;
+}
+
+function slugify(raw) {
+  const lower = String(raw || "").trim().toLowerCase();
+  let out = "";
+  for (const ch of lower) {
+    if (TRANSLIT[ch] !== undefined) out += TRANSLIT[ch];
+    else if (/[a-z0-9]/.test(ch)) out += ch;
+    else out += "-";
+  }
+  out = out.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  return out.slice(0, 40);
+}
+
+function isValidSlug(s) {
+  return /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/.test(s) && !RESERVED_SLUGS.has(s);
 }
 
 function hexToBytes(hex) {
@@ -172,18 +211,18 @@ function sessionCookie(token) {
 
 const CLEAR_COOKIE = "zr_s=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0";
 
-async function loadData(env) {
-  const raw = await env.ZROZOK_STORE.get("store:main");
+async function loadData(env, id) {
+  const raw = await env.ZROZOK_STORE.get(`store:${id}`);
   if (!raw) return DEFAULT_DATA;
   try {
-    return { ...DEFAULT_DATA, ...JSON.parse(raw) };
+    return { ...DEFAULT_DATA, ...JSON.parse(raw), legal: { ...DEFAULT_DATA.legal, ...(JSON.parse(raw).legal || {}) } };
   } catch {
     return DEFAULT_DATA;
   }
 }
 
-async function saveData(env, data) {
-  await env.ZROZOK_STORE.put("store:main", JSON.stringify(data));
+async function saveData(env, id, data) {
+  await env.ZROZOK_STORE.put(`store:${id}`, JSON.stringify(data));
 }
 
 async function getSeller(env, id) {
@@ -219,7 +258,40 @@ const HEAD = `<meta charset="utf-8">
 const FIELD = "width:100%;margin-top:4px;padding:10px 12px;border:2px solid var(--ink);border-radius:12px;font-size:14px;box-sizing:border-box;";
 const LABEL = "font-size:13px;color:var(--graphite);";
 
-function renderStorefront(data, authed) {
+function renderKutochok(legal) {
+  const regLine = legal.regNumber ? ` · Рег. номер: ${esc(legal.regNumber)}` : "";
+  const returnLine = legal.returnAddress ? `Адреса для повернень: ${esc(legal.returnAddress)}<br>` : "";
+  const phoneLine = legal.phone ? ` · ${esc(legal.phone)}` : "";
+  const licenseBlock = legal.licenseInfo ? `<p>Дозвільний документ: ${esc(legal.licenseInfo)}</p>` : "";
+
+  return `
+    <section id="kutochok" style="margin-top:24px;padding-top:18px;border-top:2px dashed var(--ink);font-size:12px;line-height:1.55;text-align:left;color:#3a362f;">
+      <h2 style="font-family:'Neucha',cursive;font-size:20px;margin:0 0 10px;color:var(--ink);">Куточок покупця</h2>
+
+      <h3 id="prodavets" style="font-size:13px;margin:12px 0 4px;">Продавець</h3>
+      <p>${esc(legal.fullName)}${regLine}<br>
+      Адреса реєстрації: ${esc(legal.legalAddress)}<br>
+      ${returnLine}Контакти: ${esc(legal.email)}${phoneLine}</p>
+      ${licenseBlock}
+
+      <h3 id="oferta" style="font-size:13px;margin:12px 0 4px;">Публічна оферта</h3>
+      <p>Розміщення товару на цій сторінці є публічною пропозицією (офертою) укласти договір купівлі-продажу дистанційно. Оформлення замовлення покупцем є прийняттям цієї пропозиції. Перед підтвердженням покупець може перевірити й виправити введені дані.</p>
+
+      <h3 id="povernennya" style="font-size:13px;margin:12px 0 4px;">Повернення, обмін, рекламації</h3>
+      <p>Товар належної якості можна повернути або обміняти протягом 14 днів з моменту отримання, попередньо узгодивши це з продавцем за контактами вище. Вартість зворотної доставки узгоджується окремо. У разі браку чи дефекту продавець забезпечує ремонт, заміну або повернення коштів відповідно до законодавства про захист прав споживачів.</p>
+
+      <h3 id="oplata" style="font-size:13px;margin:12px 0 4px;">Оплата і доставка</h3>
+      <p>Ціни на сторінці вказані в гривнях і включають усі податки та збори. Вартість доставки узгоджується з продавцем під час оформлення замовлення. Після оплати покупцю надається розрахунковий документ (фіскальний чек ПРРО/РРО або товарний чек).</p>
+
+      <h3 id="konfidentsiinist" style="font-size:13px;margin:12px 0 4px;">Політика конфіденційності</h3>
+      <p>Дані, надані під час оформлення замовлення (ім'я, контакти, адреса), використовуються лише для виконання замовлення й обробляються відповідно до Закону України «Про захист персональних даних». Сайт використовує технічні файли cookie для коректної роботи сторінки.</p>
+
+      <h3 id="kontakty" style="font-size:13px;margin:12px 0 4px;">Контролюючий орган</h3>
+      <p>У разі порушення прав споживача можна звернутися до територіального органу Держпродспоживслужби: <a href="https://dpss.gov.ua/" target="_blank" rel="noopener" style="color:inherit;">dpss.gov.ua</a></p>
+    </section>`;
+}
+
+function renderStorefront(data) {
   const limit = data.tier === "Pro" ? 10 : 4;
   const products = (data.products || []).slice(0, limit);
   const cardsHtml = products.map((p) => `
@@ -228,13 +300,22 @@ function renderStorefront(data, authed) {
     ? "Показано до 10 товарів. Великий каталог (до 1000) — через Базар Толока."
     : `Показано ${products.length} товари. Більше — на тарифі Pro.`;
   const storeInitial = (data.storeName || "М").trim().charAt(0).toUpperCase();
-  const cornerBtn = authed
-    ? `<a href="/admin" class="cart-btn" aria-label="Редагувати" style="text-decoration:none;">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2A2D33" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>
-      </a>`
-    : `<button type="button" class="cart-btn" aria-label="Кошик">
-        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#2A2D33" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h2l2.2 11.6a2 2 0 0 0 2 1.6h7.2a2 2 0 0 0 2-1.6L20 8H6"/><circle cx="9.5" cy="20" r="1.2" fill="#2A2D33" stroke="none"/><circle cx="17" cy="20" r="1.2" fill="#2A2D33" stroke="none"/></svg>
-      </button>`;
+  const avatarInner = data.avatar
+    ? `<img src="/${esc(data.avatar)}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`
+    : esc(storeInitial);
+
+  const legal = data.legal || {};
+  const hasLegal = Boolean(legal.fullName && (legal.legalAddress || legal.returnAddress) && (legal.email || legal.phone));
+  const kutochokHtml = hasLegal ? renderKutochok(legal) : "";
+  const consentHtml = hasLegal ? `
+      <label style="display:flex;gap:8px;align-items:flex-start;font-size:11px;color:var(--graphite);margin:0 0 10px;text-align:left;">
+        <input type="checkbox" style="margin-top:2px;flex:none;">
+        <span>Оформлюючи замовлення, я погоджуюся з умовами <a href="#oferta" style="color:inherit;">Публічної оферти</a> та <a href="#konfidentsiinist" style="color:inherit;">Політики конфіденційності</a>.</span>
+      </label>` : "";
+  const footerLegalLinks = hasLegal ? `
+      <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;font-size:10px;margin-top:6px;">
+        <a href="#oferta">Оферта</a><a href="#povernennya">Повернення</a><a href="#oplata">Оплата і доставка</a><a href="#konfidentsiinist">Конфіденційність</a><a href="#kontakty">Контакти</a>
+      </div>` : "";
 
   return `<!doctype html>
 <html lang="uk">
@@ -252,7 +333,7 @@ ${HEAD}
 
     <header class="header">
       <div class="shop-id">
-        <div class="avatar">${esc(storeInitial)}</div>
+        <div class="avatar">${avatarInner}</div>
         <div>
           <div class="shop-name">${esc(data.storeName)}</div>
           <span class="category-pill">
@@ -261,7 +342,9 @@ ${HEAD}
           </span>
         </div>
       </div>
-      ${cornerBtn}
+      <button type="button" class="cart-btn" aria-label="Кошик">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#2A2D33" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h2l2.2 11.6a2 2 0 0 0 2 1.6h7.2a2 2 0 0 0 2-1.6L20 8H6"/><circle cx="9.5" cy="20" r="1.2" fill="#2A2D33" stroke="none"/><circle cx="17" cy="20" r="1.2" fill="#2A2D33" stroke="none"/></svg>
+      </button>
     </header>
 
     <section class="products">
@@ -270,6 +353,7 @@ ${HEAD}
       <p class="tier-note">${esc(tierNote)}</p>
     </section>
 
+    ${consentHtml}
     <div class="pay">
       <button type="button" class="btn-pay">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2A2D33" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 9.5h19"/></svg>
@@ -295,10 +379,13 @@ ${HEAD}
       <p class="call-caption">через Голосник · дзвінок у браузері, без номера</p>
     </div>
 
+    ${kutochokHtml}
+
     <footer class="footer">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#857a65" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/></svg>
       <a href="https://magistral-it.com">Розроблено Магістраль-ІТ</a>
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#857a65" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/></svg>
+      ${footerLegalLinks}
     </footer>
 
   </div>
@@ -323,6 +410,12 @@ ${inner}
 </div>
 </body>
 </html>`;
+}
+
+function renderNotFoundStore() {
+  return page("Вітрину не знайдено", `
+    <div class="shop-name" style="font-size:22px;text-align:center;">Вітрину не знайдено</div>
+    <p style="font-size:13px;color:var(--graphite);text-align:center;margin-top:10px;">Перевірте адресу або поверніться пізніше.</p>`);
 }
 
 function renderLoginPage(error) {
@@ -398,17 +491,54 @@ function productRow(i, product) {
     </div>`;
 }
 
-function renderAdminForm(data, sellerId, saved, error) {
+function avatarField(data) {
+  const preview = data.avatar
+    ? `<img src="/${esc(data.avatar)}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:50%;border:2px solid var(--ink);flex:none;">`
+    : `<div style="width:56px;height:56px;border-radius:50%;border:2px dashed var(--ink);flex:none;"></div>`;
+  const removeOption = data.avatar
+    ? `<label style="font-size:11px;color:var(--graphite);display:flex;align-items:center;gap:4px;margin-top:4px;">
+        <input type="checkbox" name="remove_avatar"> прибрати аватарку
+      </label>`
+    : "";
+  return `
+    <div style="display:flex;gap:12px;align-items:flex-start;">
+      ${preview}
+      <div style="flex:1;">
+        <input type="file" name="avatar" accept="image/*" style="font-size:12px;">
+        <input type="hidden" name="existing_avatar" value="${esc(data.avatar)}">
+        ${removeOption}
+      </div>
+    </div>`;
+}
+
+function renderAdminForm(data, sellerId, saved, error, slugWarning) {
   const limit = data.tier === "Pro" ? 10 : 4;
   const rows = [];
   for (let i = 0; i < limit; i++) rows.push(productRow(i, (data.products || [])[i]));
+
+  const linksBlock = data.slug ? `
+    <div style="margin:10px 0 0;padding:10px 12px;border:2px dashed var(--ink);border-radius:12px;font-size:12px;">
+      <p style="margin:0 0 4px;color:var(--graphite);">Ваша вітрина:</p>
+      <a href="https://${esc(data.slug)}.tiktok.bazar.in.ua/" target="_blank" style="display:block;word-break:break-all;">${esc(data.slug)}.tiktok.bazar.in.ua</a>
+      <a href="https://${esc(data.slug)}.insta.bazar.in.ua/" target="_blank" style="display:block;word-break:break-all;">${esc(data.slug)}.insta.bazar.in.ua</a>
+    </div>` : "";
+
+  const legal = data.legal || {};
 
   return page("Адмінка — вітрина", `
     <div class="shop-name" style="font-size:24px;">Редагування вітрини</div>
     <p style="font-size:11px;color:var(--graphite);margin:4px 0 0;">${esc(sellerId)}</p>
     ${saved ? `<p style="color:#2f7a4d;font-size:13px;margin:10px 0 0;">Збережено.</p>` : ""}
+    ${slugWarning ? `<p style="color:#b4432f;font-size:12px;margin:6px 0 0;">Цей слаг зайнятий або некоректний (3-40 символів, латиниця/цифри/дефіс) — лишили попередній.</p>` : ""}
     ${error ? `<p style="color:#b4432f;font-size:13px;margin:10px 0 0;">${esc(error)}</p>` : ""}
+    ${linksBlock}
     <form method="POST" action="/admin/save" enctype="multipart/form-data" style="display:flex;flex-direction:column;gap:14px;margin-top:16px;">
+
+      <div>
+        <p style="${LABEL}margin-bottom:8px;">Аватарка</p>
+        ${avatarField(data)}
+      </div>
+
       <label style="${LABEL}">
         Назва магазину
         <input type="text" name="store_name" value="${esc(data.storeName)}" required style="${FIELD}">
@@ -416,6 +546,10 @@ function renderAdminForm(data, sellerId, saved, error) {
       <label style="${LABEL}">
         Категорія
         <input type="text" name="category" value="${esc(data.category)}" required style="${FIELD}">
+      </label>
+      <label style="${LABEL}">
+        Адреса вітрини (слаг)
+        <input type="text" name="slug" value="${esc(data.slug)}" placeholder="moy-magazyn" style="${FIELD}">
       </label>
       <label style="${LABEL}">
         Тариф
@@ -428,16 +562,52 @@ function renderAdminForm(data, sellerId, saved, error) {
         Акцентний колір
         <input type="color" name="accent" value="${esc(data.accent)}" style="display:block;margin-top:4px;width:60px;height:36px;border:2px solid var(--ink);border-radius:8px;padding:2px;">
       </label>
+
       <div>
         <p style="${LABEL}margin-bottom:8px;">Товари (назва, ціна, фото — до 4 МБ)</p>
         <div style="display:flex;flex-direction:column;gap:10px;">
           ${rows.join("")}
         </div>
       </div>
+
+      <div style="border-top:2px dashed var(--ink);padding-top:14px;">
+        <p style="${LABEL}margin-bottom:2px;">Куточок покупця (необов'язково)</p>
+        <p style="font-size:11px;color:var(--graphite);margin:0 0 10px;">Заповніть, щоб на вітрині з'явився блок із юридичною інформацією (вимога закону про дистанційну торгівлю). Можна лишити порожнім і заповнити пізніше.</p>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <label style="${LABEL}">
+            ПІБ ФОП або назва компанії
+            <input type="text" name="legal_name" value="${esc(legal.fullName)}" style="${FIELD}">
+          </label>
+          <label style="${LABEL}">
+            Реєстраційний номер (ЄДРПОУ/РНОКПП), за наявності
+            <input type="text" name="legal_regnum" value="${esc(legal.regNumber)}" style="${FIELD}">
+          </label>
+          <label style="${LABEL}">
+            Адреса реєстрації
+            <input type="text" name="legal_address" value="${esc(legal.legalAddress)}" style="${FIELD}">
+          </label>
+          <label style="${LABEL}">
+            Адреса для повернень (якщо відрізняється)
+            <input type="text" name="legal_return_address" value="${esc(legal.returnAddress)}" style="${FIELD}">
+          </label>
+          <label style="${LABEL}">
+            Email
+            <input type="email" name="legal_email" value="${esc(legal.email)}" style="${FIELD}">
+          </label>
+          <label style="${LABEL}">
+            Телефон
+            <input type="text" name="legal_phone" value="${esc(legal.phone)}" style="${FIELD}">
+          </label>
+          <label style="${LABEL}">
+            Ліцензія (якщо товар підлягає ліцензуванню)
+            <input type="text" name="legal_license" value="${esc(legal.licenseInfo)}" style="${FIELD}">
+          </label>
+        </div>
+      </div>
+
       <button type="submit" class="btn-pay">Зберегти</button>
     </form>
-    <div style="display:flex;justify-content:space-between;margin-top:18px;font-size:12px;">
-      <a href="/" style="color:var(--graphite);">← На вітрину</a>
+    <div style="display:flex;justify-content:flex-end;margin-top:18px;font-size:12px;">
       <a href="/admin/logout" style="color:var(--graphite);">Вийти</a>
     </div>`);
 }
@@ -514,6 +684,7 @@ export default {
     const path = url.pathname;
     const method = request.method;
     const ip = getClientIp(request);
+    const host = (request.headers.get("Host") || "").toLowerCase();
 
     if (path.startsWith("/photos/")) {
       const key = decodeURIComponent(path).slice(1);
@@ -524,6 +695,24 @@ export default {
       headers.set("Cache-Control", "public, max-age=31536000, immutable");
       headers.set("ETag", obj.httpEtag);
       return new Response(obj.body, { headers });
+    }
+
+    let publicSlug = null;
+    for (const suffix of PUBLIC_HOST_SUFFIXES) {
+      if (host.endsWith(suffix)) {
+        publicSlug = host.slice(0, host.length - suffix.length);
+        break;
+      }
+    }
+
+    if (publicSlug !== null) {
+      if (path === "/") {
+        const sellerId = publicSlug ? await env.ZROZOK_STORE.get(`slug:${publicSlug}`) : null;
+        if (!sellerId) return html(renderNotFoundStore(), 404);
+        const data = await loadData(env, sellerId);
+        return html(renderStorefront(data));
+      }
+      return env.ASSETS.fetch(request);
     }
 
     if (path === "/admin/login" && method === "POST") {
@@ -649,7 +838,7 @@ export default {
       if (!session || session.r !== "seller") return redirect("/admin");
 
       const form = await request.formData();
-      const existing = await loadData(env);
+      const existing = await loadData(env, session.id);
       const tier = form.get("tier") === "Pro" ? "Pro" : "Free";
       const limit = tier === "Pro" ? 10 : 4;
 
@@ -678,32 +867,92 @@ export default {
 
         products.push({ name, price, photo });
       }
-
       if (existing.products && existing.products.length > limit) {
         products.push(...existing.products.slice(limit));
       }
 
-      await saveData(env, {
-        storeName: (form.get("store_name") || "").toString().trim() || DEFAULT_DATA.storeName,
+      let avatar = (form.get("existing_avatar") || "").toString();
+      const removeAvatar = Boolean(form.get("remove_avatar"));
+      const avatarFile = form.get("avatar");
+      if (avatarFile && typeof avatarFile === "object" && typeof avatarFile.arrayBuffer === "function" && avatarFile.size > 0) {
+        if (avatarFile.size <= MAX_PHOTO_BYTES && avatarFile.type && avatarFile.type.startsWith("image/")) {
+          const key = `photos/${session.id}/avatar`;
+          await env.ZROZOK_PHOTOS.put(key, await avatarFile.arrayBuffer(), {
+            httpMetadata: { contentType: avatarFile.type }
+          });
+          avatar = key;
+        }
+      } else if (removeAvatar && avatar) {
+        await env.ZROZOK_PHOTOS.delete(avatar).catch(() => {});
+        avatar = "";
+      }
+
+      const storeName = (form.get("store_name") || "").toString().trim() || DEFAULT_DATA.storeName;
+
+      let finalSlug = existing.slug || "";
+      let slugWarning = false;
+      const requestedRaw = (form.get("slug") || "").toString().trim();
+      let desiredSlug = slugify(requestedRaw);
+      if (!desiredSlug) desiredSlug = finalSlug || slugify(storeName) || slugify(session.id);
+      if (!isValidSlug(desiredSlug)) {
+        if (requestedRaw) slugWarning = true;
+        desiredSlug = finalSlug || slugify(storeName) || slugify(session.id);
+        if (!isValidSlug(desiredSlug)) desiredSlug = `shop-${slugify(session.id)}`.slice(0, 40);
+      }
+      if (desiredSlug !== finalSlug) {
+        const owner = await env.ZROZOK_STORE.get(`slug:${desiredSlug}`);
+        if (owner && owner !== session.id) {
+          slugWarning = true;
+        } else {
+          if (finalSlug) await env.ZROZOK_STORE.delete(`slug:${finalSlug}`);
+          await env.ZROZOK_STORE.put(`slug:${desiredSlug}`, session.id);
+          finalSlug = desiredSlug;
+        }
+      }
+      if (!finalSlug) {
+        const fallback = (`shop-${slugify(session.id)}` || `shop-${Date.now().toString(36)}`).slice(0, 40);
+        await env.ZROZOK_STORE.put(`slug:${fallback}`, session.id);
+        finalSlug = fallback;
+      }
+
+      const legal = {
+        fullName: (form.get("legal_name") || "").toString().trim(),
+        regNumber: (form.get("legal_regnum") || "").toString().trim(),
+        legalAddress: (form.get("legal_address") || "").toString().trim(),
+        returnAddress: (form.get("legal_return_address") || "").toString().trim(),
+        email: (form.get("legal_email") || "").toString().trim(),
+        phone: (form.get("legal_phone") || "").toString().trim(),
+        licenseInfo: (form.get("legal_license") || "").toString().trim()
+      };
+
+      await saveData(env, session.id, {
+        storeName,
         category: (form.get("category") || "").toString().trim() || DEFAULT_DATA.category,
         tier,
         accent: (form.get("accent") || "").toString().trim() || DEFAULT_DATA.accent,
-        products
+        products,
+        avatar,
+        slug: finalSlug,
+        legal
       });
-      return redirect("/admin?saved=1");
+
+      return redirect(`/admin?saved=1${slugWarning ? "&slugwarn=1" : ""}`);
     }
 
     if (path === "/admin") {
       const session = await readSession(request, env);
       if (!session || session.r !== "seller") return html(renderLoginPage(null));
-      const data = await loadData(env);
-      return html(renderAdminForm(data, session.id, url.searchParams.get("saved") === "1", null));
+      const data = await loadData(env, session.id);
+      return html(renderAdminForm(
+        data, session.id,
+        url.searchParams.get("saved") === "1",
+        null,
+        url.searchParams.get("slugwarn") === "1"
+      ));
     }
 
     if (path === "/") {
-      const session = await readSession(request, env);
-      const data = await loadData(env);
-      return html(renderStorefront(data, Boolean(session && session.r === "seller")));
+      return redirect("/admin");
     }
 
     return env.ASSETS.fetch(request);
