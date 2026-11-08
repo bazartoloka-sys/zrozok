@@ -265,8 +265,8 @@ function renderKutochok(legal) {
   const licenseBlock = legal.licenseInfo ? `<p>Дозвільний документ: ${esc(legal.licenseInfo)}</p>` : "";
 
   return `
-    <section id="kutochok" style="margin-top:24px;padding-top:18px;border-top:2px dashed var(--ink);font-size:12px;line-height:1.55;text-align:left;color:#3a362f;">
-      <h2 style="font-family:'Neucha',cursive;font-size:20px;margin:0 0 10px;color:var(--ink);">Куточок покупця</h2>
+    <details id="kutochok" style="margin-top:24px;padding-top:18px;border-top:2px dashed var(--ink);font-size:12px;line-height:1.55;text-align:left;color:#3a362f;">
+      <summary style="cursor:pointer;font-family:'Neucha',cursive;font-size:20px;margin:0 0 10px;color:var(--ink);">Куточок покупця</summary>
 
       <h3 id="prodavets" style="font-size:13px;margin:12px 0 4px;">Продавець</h3>
       <p>${esc(legal.fullName)}${regLine}<br>
@@ -288,7 +288,7 @@ function renderKutochok(legal) {
 
       <h3 id="kontakty" style="font-size:13px;margin:12px 0 4px;">Контролюючий орган</h3>
       <p>У разі порушення прав споживача можна звернутися до територіального органу Держпродспоживслужби: <a href="https://dpss.gov.ua/" target="_blank" rel="noopener" style="color:inherit;">dpss.gov.ua</a></p>
-    </section>`;
+    </details>`;
 }
 
 function renderStorefront(data) {
