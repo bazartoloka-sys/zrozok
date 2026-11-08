@@ -87,7 +87,8 @@ async function hmac(secret, message) {
 
 async function makeSession(env) {
   const exp = Math.floor(Date.now() / 1000) + 2 * 3600;
-  const sig = await hmac(env.SESSION_SECRET, String(exp));
+  const secret = await env.SESSION_SECRET.get();
+  const sig = await hmac(secret, String(exp));
   return `${exp}.${sig}`;
 }
 
@@ -104,7 +105,8 @@ async function isAuthed(request, env) {
   if (!expStr || !sig) return false;
   const exp = parseInt(expStr, 10);
   if (!exp || Date.now() / 1000 > exp) return false;
-  const expected = await hmac(env.SESSION_SECRET, expStr);
+  const secret = await env.SESSION_SECRET.get();
+  const expected = await hmac(secret, expStr);
   return expected === sig;
 }
 
@@ -331,8 +333,10 @@ export default {
         });
       }
 
-      const idOk = Boolean(id) && id === env.ADMIN_HOLOSNYK_ID;
-      const passOk = Boolean(pass) && (await verifyPassword(pass, env.ADMIN_PASSWORD_HASH));
+      const storedId = await env.ADMIN_HOLOSNYK_ID.get();
+      const storedHash = await env.ADMIN_PASSWORD_HASH.get();
+      const idOk = Boolean(id) && id === storedId;
+      const passOk = Boolean(pass) && (await verifyPassword(pass, storedHash));
 
       if (idOk && passOk) {
         await Promise.all([clearFailCount(env, idKey), clearFailCount(env, ipKey)]);
