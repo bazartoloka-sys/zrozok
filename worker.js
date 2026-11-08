@@ -551,13 +551,12 @@ function renderAdminForm(data, sellerId, saved, error, slugWarning) {
         Адреса вітрини (слаг)
         <input type="text" name="slug" value="${esc(data.slug)}" placeholder="moy-magazyn" style="${FIELD}">
       </label>
-      <label style="${LABEL}">
-        Тариф
-        <select name="tier" style="${FIELD}">
-          <option value="Free" ${data.tier === "Free" ? "selected" : ""}>Free (4 товари)</option>
-          <option value="Pro" ${data.tier === "Pro" ? "selected" : ""}>Pro (до 10 товарів)</option>
-        </select>
-      </label>
+      <div style="${LABEL}">
+        Тариф: <strong>${data.tier === "Pro" ? "Pro (до 10 товарів)" : "Free (4 товари)"}</strong>
+        ${data.tier === "Pro"
+          ? `<p style="font-size:11px;color:#2f7a4d;margin:4px 0 0;">🔒 Pro активний.</p>`
+          : `<p style="font-size:11px;color:var(--graphite);margin:4px 0 0;">🔒 Pro — до 10 товарів і власний домен. Напишіть нам, щоб підключити.</p>`}
+      </div>
       <label style="${LABEL}">
         Акцентний колір
         <input type="color" name="accent" value="${esc(data.accent)}" style="display:block;margin-top:4px;width:60px;height:36px;border:2px solid var(--ink);border-radius:8px;padding:2px;">
@@ -625,14 +624,15 @@ function renderOwnerLogin(error) {
     </form>`);
 }
 
-function renderOwnerPanel(sellers, issued, error) {
+function renderOwnerPanel(sellers, issued, error, tierMsg) {
   const rows = sellers.length
     ? sellers.map((s) => `
       <tr>
         <td style="padding:6px 8px;border-bottom:1px solid #E0E3E7;font-size:13px;">${esc(s.id)}</td>
         <td style="padding:6px 8px;border-bottom:1px solid #E0E3E7;font-size:12px;color:var(--graphite);">${s.active ? "активний" : "очікує активації"}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #E0E3E7;font-size:12px;color:var(--graphite);">${s.active ? (s.tier === "Pro" ? "🔒 Pro" : "Free") : "—"}</td>
       </tr>`).join("")
-    : `<tr><td colspan="2" style="padding:8px;font-size:12px;color:var(--graphite);">Поки нікого немає.</td></tr>`;
+    : `<tr><td colspan="3" style="padding:8px;font-size:12px;color:var(--graphite);">Поки нікого немає.</td></tr>`;
 
   const issuedBlock = issued ? `
     <div style="margin:16px 0;padding:14px;border:2px dashed var(--ink);border-radius:14px;text-align:center;">
@@ -641,9 +641,12 @@ function renderOwnerPanel(sellers, issued, error) {
       <p style="font-size:11px;color:var(--graphite);margin:8px 0 0;">Передайте продавцю разом із посиланням на /activate. Більше він не показується.</p>
     </div>` : "";
 
+  const tierMsgBlock = tierMsg ? `<p style="color:#2f7a4d;font-size:13px;margin:10px 0 0;">${esc(tierMsg)}</p>` : "";
+
   return page("Панель власника", `
     <div class="shop-name" style="font-size:24px;">Панель власника</div>
     ${error ? `<p style="color:#b4432f;font-size:13px;margin:10px 0 0;">${esc(error)}</p>` : ""}
+    ${tierMsgBlock}
     ${issuedBlock}
     <form method="POST" action="/owner/issue" style="display:flex;flex-direction:column;gap:12px;margin-top:16px;">
       <label style="${LABEL}">
@@ -653,10 +656,27 @@ function renderOwnerPanel(sellers, issued, error) {
       <button type="submit" class="btn-pay">Видати код активації</button>
     </form>
     <p style="font-size:11px;color:var(--graphite);margin-top:10px;">Для нового продавця — заводить акаунт. Для наявного — скидає пароль.</p>
+
+    <form method="POST" action="/owner/set-tier" style="display:flex;flex-direction:column;gap:12px;margin-top:20px;border-top:2px dashed var(--ink);padding-top:16px;">
+      <label style="${LABEL}">
+        ID Голосника продавця
+        <input type="text" name="holosnyk_id" placeholder="ГЛС-0000-ХХХ" required style="${FIELD}">
+      </label>
+      <label style="${LABEL}">
+        Тариф
+        <select name="tier" style="${FIELD}">
+          <option value="Free">Free</option>
+          <option value="Pro">Pro</option>
+        </select>
+      </label>
+      <button type="submit" class="btn-pay">Встановити тариф</button>
+    </form>
+
     <table style="width:100%;border-collapse:collapse;margin-top:20px;">
       <thead><tr>
         <th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--graphite);border-bottom:2px solid var(--ink);">Продавець</th>
         <th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--graphite);border-bottom:2px solid var(--ink);">Статус</th>
+        <th style="text-align:left;padding:6px 8px;font-size:11px;color:var(--graphite);border-bottom:2px solid var(--ink);">Тариф</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
@@ -675,7 +695,14 @@ async function listSellers(env) {
     const id = k.name.slice(11);
     if (!map.has(id)) map.set(id, { id, active: false });
   }
-  return [...map.values()].sort((a, b) => a.id.localeCompare(b.id));
+  const list = [...map.values()].sort((a, b) => a.id.localeCompare(b.id));
+  for (const s of list) {
+    if (s.active) {
+      const data = await loadData(env, s.id);
+      s.tier = data.tier === "Pro" ? "Pro" : "Free";
+    }
+  }
+  return list;
 }
 
 export default {
@@ -827,6 +854,25 @@ export default {
       return html(renderOwnerPanel(await listSellers(env), { id, code }, null));
     }
 
+    if (path === "/owner/set-tier" && method === "POST") {
+      const session = await readSession(request, env);
+      if (!session || session.r !== "owner") return redirect("/owner");
+
+      const form = await request.formData();
+      const id = normalizeId(form.get("holosnyk_id"));
+      const tier = form.get("tier") === "Pro" ? "Pro" : "Free";
+      if (!id) {
+        return html(renderOwnerPanel(await listSellers(env), null, "Вкажіть ID Голосника."));
+      }
+      const seller = await getSeller(env, id);
+      if (!seller) {
+        return html(renderOwnerPanel(await listSellers(env), null, `Продавця ${id} не знайдено серед активних.`));
+      }
+      const data = await loadData(env, id);
+      await saveData(env, id, { ...data, tier });
+      return html(renderOwnerPanel(await listSellers(env), null, null, `Тариф для ${id} встановлено: ${tier}.`));
+    }
+
     if (path === "/owner") {
       const session = await readSession(request, env);
       if (!session || session.r !== "owner") return html(renderOwnerLogin(null));
@@ -839,7 +885,7 @@ export default {
 
       const form = await request.formData();
       const existing = await loadData(env, session.id);
-      const tier = form.get("tier") === "Pro" ? "Pro" : "Free";
+      const tier = existing.tier === "Pro" ? "Pro" : "Free";
       const limit = tier === "Pro" ? 10 : 4;
 
       const products = [];
