@@ -11,10 +11,69 @@ const DEFAULT_DATA = {
   ]
 };
 
+const LOGIN_LIMIT = 5;
+const LOGIN_WINDOW = 900;
+
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   }[c]));
+}
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+  }
+  return bytes;
+}
+
+function bytesToHex(bytes) {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function verifyPassword(password, stored) {
+  const parts = (stored || "").split("$");
+  if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
+  const iterations = parseInt(parts[1], 10);
+  const salt = hexToBytes(parts[2]);
+  const expectedHex = parts[3];
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    keyMaterial, 256
+  );
+  const gotHex = bytesToHex(new Uint8Array(bits));
+  return timingSafeEqual(gotHex, expectedHex);
+}
+
+function getClientIp(request) {
+  return request.headers.get("CF-Connecting-IP") || "unknown";
+}
+
+async function getFailCount(env, key) {
+  const raw = await env.ZROZOK_STORE.get(key);
+  return raw ? parseInt(raw, 10) || 0 : 0;
+}
+
+async function bumpFailCount(env, key) {
+  const count = (await getFailCount(env, key)) + 1;
+  await env.ZROZOK_STORE.put(key, String(count), { expirationTtl: LOGIN_WINDOW });
+  return count;
+}
+
+async function clearFailCount(env, key) {
+  await env.ZROZOK_STORE.delete(key);
 }
 
 async function hmac(secret, message) {
@@ -257,7 +316,26 @@ export default {
       const form = await request.formData();
       const id = (form.get("holosnyk_id") || "").toString().trim();
       const pass = (form.get("password") || "").toString();
-      if (id && pass && id === env.ADMIN_HOLOSNYK_ID && pass === env.ADMIN_PASSWORD) {
+      const ip = getClientIp(request);
+      const idKey = `login_fail:id:${id || "empty"}`;
+      const ipKey = `login_fail:ip:${ip}`;
+
+      const [idFails, ipFails] = await Promise.all([
+        getFailCount(env, idKey),
+        getFailCount(env, ipKey)
+      ]);
+      if (idFails >= LOGIN_LIMIT || ipFails >= LOGIN_LIMIT) {
+        return new Response(renderLoginPage("Забагато спроб. Спробуйте через 15 хвилин."), {
+          status: 429,
+          headers: { "Content-Type": "text/html; charset=utf-8" }
+        });
+      }
+
+      const idOk = Boolean(id) && id === env.ADMIN_HOLOSNYK_ID;
+      const passOk = Boolean(pass) && (await verifyPassword(pass, env.ADMIN_PASSWORD_HASH));
+
+      if (idOk && passOk) {
+        await Promise.all([clearFailCount(env, idKey), clearFailCount(env, ipKey)]);
         const token = await makeSession(env);
         return new Response(null, {
           status: 303,
@@ -267,6 +345,8 @@ export default {
           }
         });
       }
+
+      await Promise.all([bumpFailCount(env, idKey), bumpFailCount(env, ipKey)]);
       return new Response(renderLoginPage("Невірний ID або пароль."), {
         status: 401,
         headers: { "Content-Type": "text/html; charset=utf-8" }
