@@ -4,10 +4,10 @@ const DEFAULT_DATA = {
   tier: "Free",
   accent: "#D9643F",
   products: [
-    { name: "Шапка", price: "320 ₴" },
-    { name: "Шарф", price: "280 ₴" },
-    { name: "Светр", price: "650 ₴" },
-    { name: "Рукавички", price: "180 ₴" }
+    { name: "Шапка", price: "320 ₴", photo: "" },
+    { name: "Шарф", price: "280 ₴", photo: "" },
+    { name: "Светр", price: "650 ₴", photo: "" },
+    { name: "Рукавички", price: "180 ₴", photo: "" }
   ]
 };
 
@@ -17,6 +17,7 @@ const SESSION_TTL = 2 * 3600;
 const CODE_TTL = 86400;
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MIN_PASSWORD = 8;
+const MAX_PHOTO_BYTES = 4 * 1024 * 1024;
 
 const HOMOGLYPHS = {
   A: "А", B: "В", C: "С", E: "Е", H: "Н", I: "І", K: "К",
@@ -222,7 +223,7 @@ function renderStorefront(data, authed) {
   const limit = data.tier === "Pro" ? 10 : 4;
   const products = (data.products || []).slice(0, limit);
   const cardsHtml = products.map((p) => `
-        <li class="card"><div class="card-photo"><span>фото товару</span></div><div class="card-body"><div class="card-name">${esc(p.name)}</div><div class="card-price">${esc(p.price)}</div></div></li>`).join("");
+        <li class="card"><div class="card-photo">${p.photo ? `<img src="/photos/${esc(p.photo)}" alt="${esc(p.name)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">` : `<span>фото товару</span>`}</div><div class="card-body"><div class="card-name">${esc(p.name)}</div><div class="card-price">${esc(p.price)}</div></div></li>`).join("");
   const tierNote = data.tier === "Pro"
     ? "Показано до 10 товарів. Великий каталог (до 1000) — через Базар Толока."
     : `Показано ${products.length} товари. Більше — на тарифі Pro.`;
@@ -374,13 +375,40 @@ function renderActivatePage(message, error, prefillId) {
     </p>`);
 }
 
-function renderAdminForm(data, sellerId, saved) {
-  const productsText = (data.products || []).map((p) => `${p.name}; ${p.price}`).join("\n");
+function productRow(i, product) {
+  const p = product || { name: "", price: "", photo: "" };
+  const preview = p.photo
+    ? `<img src="/photos/${esc(p.photo)}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:2px solid var(--ink);flex:none;">`
+    : `<div style="width:48px;height:48px;border-radius:8px;border:2px dashed var(--ink);flex:none;"></div>`;
+  const removeOption = p.photo
+    ? `<label style="font-size:11px;color:var(--graphite);display:flex;align-items:center;gap:4px;margin-top:2px;">
+        <input type="checkbox" name="remove_photo_${i}"> прибрати фото
+      </label>`
+    : "";
+  return `
+    <div style="display:flex;gap:10px;align-items:flex-start;padding:10px;border:2px solid var(--ink);border-radius:14px;">
+      ${preview}
+      <div style="flex:1;display:flex;flex-direction:column;gap:6px;min-width:0;">
+        <input type="text" name="name_${i}" value="${esc(p.name)}" placeholder="Назва товару" style="${FIELD}margin-top:0;">
+        <input type="text" name="price_${i}" value="${esc(p.price)}" placeholder="Ціна, напр. 320 ₴" style="${FIELD}margin-top:0;">
+        <input type="file" name="photo_${i}" accept="image/*" style="font-size:12px;">
+        <input type="hidden" name="existing_photo_${i}" value="${esc(p.photo)}">
+        ${removeOption}
+      </div>
+    </div>`;
+}
+
+function renderAdminForm(data, sellerId, saved, error) {
+  const limit = data.tier === "Pro" ? 10 : 4;
+  const rows = [];
+  for (let i = 0; i < limit; i++) rows.push(productRow(i, (data.products || [])[i]));
+
   return page("Адмінка — вітрина", `
     <div class="shop-name" style="font-size:24px;">Редагування вітрини</div>
     <p style="font-size:11px;color:var(--graphite);margin:4px 0 0;">${esc(sellerId)}</p>
     ${saved ? `<p style="color:#2f7a4d;font-size:13px;margin:10px 0 0;">Збережено.</p>` : ""}
-    <form method="POST" action="/admin/save" style="display:flex;flex-direction:column;gap:14px;margin-top:16px;">
+    ${error ? `<p style="color:#b4432f;font-size:13px;margin:10px 0 0;">${esc(error)}</p>` : ""}
+    <form method="POST" action="/admin/save" enctype="multipart/form-data" style="display:flex;flex-direction:column;gap:14px;margin-top:16px;">
       <label style="${LABEL}">
         Назва магазину
         <input type="text" name="store_name" value="${esc(data.storeName)}" required style="${FIELD}">
@@ -400,10 +428,12 @@ function renderAdminForm(data, sellerId, saved) {
         Акцентний колір
         <input type="color" name="accent" value="${esc(data.accent)}" style="display:block;margin-top:4px;width:60px;height:36px;border:2px solid var(--ink);border-radius:8px;padding:2px;">
       </label>
-      <label style="${LABEL}">
-        Товари — по одному в рядку, формат «Назва; Ціна»
-        <textarea name="products_text" rows="6" style="${FIELD}font-family:inherit;">${esc(productsText)}</textarea>
-      </label>
+      <div>
+        <p style="${LABEL}margin-bottom:8px;">Товари (назва, ціна, фото — до 4 МБ)</p>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          ${rows.join("")}
+        </div>
+      </div>
       <button type="submit" class="btn-pay">Зберегти</button>
     </form>
     <div style="display:flex;justify-content:space-between;margin-top:18px;font-size:12px;">
@@ -484,6 +514,17 @@ export default {
     const path = url.pathname;
     const method = request.method;
     const ip = getClientIp(request);
+
+    if (path.startsWith("/photos/")) {
+      const key = decodeURIComponent(path).slice(1);
+      const obj = await env.ZROZOK_PHOTOS.get(key);
+      if (!obj) return env.ASSETS.fetch(request);
+      const headers = new Headers();
+      obj.writeHttpMetadata(headers);
+      headers.set("Cache-Control", "public, max-age=31536000, immutable");
+      headers.set("ETag", obj.httpEtag);
+      return new Response(obj.body, { headers });
+    }
 
     if (path === "/admin/login" && method === "POST") {
       const form = await request.formData();
@@ -608,16 +649,44 @@ export default {
       if (!session || session.r !== "seller") return redirect("/admin");
 
       const form = await request.formData();
-      const productsText = (form.get("products_text") || "").toString();
-      const products = productsText.split("\n").map((l) => l.trim()).filter(Boolean).map((line) => {
-        const idx = line.indexOf(";");
-        if (idx === -1) return { name: line.trim(), price: "" };
-        return { name: line.slice(0, idx).trim(), price: line.slice(idx + 1).trim() };
-      });
+      const existing = await loadData(env);
+      const tier = form.get("tier") === "Pro" ? "Pro" : "Free";
+      const limit = tier === "Pro" ? 10 : 4;
+
+      const products = [];
+      for (let i = 0; i < limit; i++) {
+        const name = (form.get(`name_${i}`) || "").toString().trim();
+        if (!name) continue;
+        const price = (form.get(`price_${i}`) || "").toString().trim();
+        const existingPhoto = (form.get(`existing_photo_${i}`) || "").toString();
+        const removePhoto = Boolean(form.get(`remove_photo_${i}`));
+        const file = form.get(`photo_${i}`);
+        let photo = existingPhoto;
+
+        if (file && typeof file === "object" && typeof file.arrayBuffer === "function" && file.size > 0) {
+          if (file.size <= MAX_PHOTO_BYTES && file.type && file.type.startsWith("image/")) {
+            const key = `photos/${session.id}/${i}`;
+            await env.ZROZOK_PHOTOS.put(key, await file.arrayBuffer(), {
+              httpMetadata: { contentType: file.type }
+            });
+            photo = key;
+          }
+        } else if (removePhoto && existingPhoto) {
+          await env.ZROZOK_PHOTOS.delete(existingPhoto).catch(() => {});
+          photo = "";
+        }
+
+        products.push({ name, price, photo });
+      }
+
+      if (existing.products && existing.products.length > limit) {
+        products.push(...existing.products.slice(limit));
+      }
+
       await saveData(env, {
         storeName: (form.get("store_name") || "").toString().trim() || DEFAULT_DATA.storeName,
         category: (form.get("category") || "").toString().trim() || DEFAULT_DATA.category,
-        tier: form.get("tier") === "Pro" ? "Pro" : "Free",
+        tier,
         accent: (form.get("accent") || "").toString().trim() || DEFAULT_DATA.accent,
         products
       });
@@ -628,7 +697,7 @@ export default {
       const session = await readSession(request, env);
       if (!session || session.r !== "seller") return html(renderLoginPage(null));
       const data = await loadData(env);
-      return html(renderAdminForm(data, session.id, url.searchParams.get("saved") === "1"));
+      return html(renderAdminForm(data, session.id, url.searchParams.get("saved") === "1", null));
     }
 
     if (path === "/") {

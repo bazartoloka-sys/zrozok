@@ -11,6 +11,9 @@
   "kv_namespaces": [
     { "binding": "ZROZOK_STORE", "id": "3b71c0eb22a444dd8ca0b7e235363f09" }
   ],
+  "r2_buckets": [
+    { "binding": "ZROZOK_PHOTOS", "bucket_name": "zrozok-photos" }
+  ],
   "secrets_store_secrets": [
     { "binding": "SESSION_SECRET", "store_id": "9cee3832b5c041368cac26bc6f7a64ee", "secret_name": "SESSION_SECRET" },
     { "binding": "OWNER_TOKEN", "store_id": "9cee3832b5c041368cac26bc6f7a64ee", "secret_name": "OWNER_TOKEN" }
